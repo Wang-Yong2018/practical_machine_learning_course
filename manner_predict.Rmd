@@ -21,16 +21,18 @@ You should create a report describing
 - predict 20 different test cases. 
 
 # 1. Exploratory Data Analysis
-```{r init, echo=FALSE,message=FALSE, warning=FALSE}
-library(dplyr)
-library(caret)
-library(ggplot2)
-library(data.table)
-library(lubridate)
-library(moments)
+```{r init, echo=TRUE,message=FALSE, warning=FALSE}
+library(dplyr) # data manipulate
+library(caret) # machine learning
+library(ggplot2) # data visualization
+library(data.table) # data loading
+library(lubridate) # datetime manipulate
+library(moments)  # caculate moments such skew, and etc.
+library(mice)  # missing value imputation
+library(rattle) # fancyplot for decision treee
 ```
 ## 1.1 Load Data  
-load the pml-training.csv as pml-train, pml-testing.csv as pml-test. and see the variable names. There are 160 variables. and the 'classes' is responsible variable.
+load the pml-training.csv as pml-train, pml-testing.csv as pml-test. 
 ```{r load, echo=FALSE,message=FALSE, warning=FALSE,cache=TRUE}
 pml_train <- fread('pml-training.csv')
 pml_test <- fread('pml-training.csv')
@@ -39,114 +41,102 @@ dim(pml_train)
 ```
 The original data has 19622 obs, and 160 variables. 
 
-
-## 1.2 contingency table(user_name with classes) 
+## 1.2 check the outcome by contingency table
 ```{r,eda,echo=FALSE}
 table(pml_train$user_name,pml_train$classe)
 ```
-Base on above table it can be find there is 6 people and 5 types of classes 
-movement.
+It can be find there is 6 people and 5 types of exercise classes(outcome, need predict) 
 
 # 2. PreProcess
-## 2.1 missing value imputation
+
+## 2.1 drop missing value variable and keep 60 variable
 ```{r mice, echo=FALSE}
 library(ggplot2)
-
+drop_ratio=0.97
 get_missing_rate<-function(x) { 100*sum(is.na(x))/length(x)}
 var_na_scores <- sapply(pml_train, get_missing_rate) 
-na_rate_df <- data.frame(table(round(var_na_scores,1))) %>% filter(Var1!=0)
+na_rate_df <- data.frame(table(round(var_na_scores,1)))
 g<- ggplot(data=na_rate_df,aes(Var1, Freq))
 g+geom_col(fill='blue' ) +
   #coord_polar("y", start=0)+
   coord_flip()+
+  geom_text(aes(label=Freq), position=position_dodge(0.9), hjust=-0.5)+
   labs(  x='the rate(%) of missing',
          y='#the number of variables',
          title='Missing Value Variables status'
          )
 # drop the 100% missing value variable, they 
-var_na_full <-names(var_na_scores[var_na_scores==100])
-#print("100% missing value variables will be removed, they are:")
-print(var_na_full)
-pre_train <- pml_train %>% select(-all_of(var_na_full))
-pre_test <- pml_test%>% select(-all_of(var_na_full))
-```
-According to the Missingc
-## 2.1 drop variable missing rate >95%
-many of variables were almost all of missing value. Next, we will drop those variable missing value ratio
-large than 95%. 
-```{r drop_cols,echo=FALSE}
-# drop missing ratio large than 95%
-# compare it to  nearzerovalue, it focused on missing value instead of same value.
-# to do: if has time, the missing value variable should check  if it is random 
-# missing or due to systematic reason. At this stage, just drop it.
-
-drop_ratio=0.95
-
-variable_missing_ratio <- pml_train %>% 
-  summarise(., across(everything(), cnt<-function(x) sum(is.na(x))/length(x))) %>%
-  t() 
-
-useful_variables <- names(variable_missing_ratio[!variable_missing_ratio>=drop_ratio,])
-
-pre_train <- pml_train %>% select(c(useful_variables))
-pre_test <- pml_test %>% select(c(useful_variables))
-
-pre_train_obs_length<-dim(pre_train)[1]
-pre_train_variables_len <-dim(pre_train)[2]
-
-pre_test_obs_length<-dim(pre_test)[1]
-
-```
-After drop those variable, now, we has only 60 variables.
-The pml_train has `r pml_train_obs_length` observations and `r pml_train_variables_len` variables(include the classes).
-
-## 2.2 Drop variables nearzerovariable
-skip it as it has similar effect that drop missing value variable.s
-```{r preProcess,cache=TRUE}
-# nsv <- nearZeroVar(pre_train)
-# pre_train <- pre_train[,-nsv]
-#pre_test <- pre_test[,-nsv]
+var_dropped <-names(var_na_scores[var_na_scores>100*drop_ratio])
+pre_train <- pml_train %>% select(-all_of(var_dropped))
+pre_test <- pml_test %>% select(-all_of(var_dropped))
+#print(var_na_full)
 ```
 
-## 2.3 transform variable skewnesss >1
-```{r transskew,echo=FALSE}
-# skew_score <- pre_train %>% select(-user_name,-classe,-new_window) %>% summarize(across(everything(),skewness)) %>% abs %>%t
-```
-## 2.3 transform datetime related variables
+The loaded data in pml-training has 160 variable. However, 100 variabls are 
+almost missing value, the missing value rate is more than 97%. All of the 100 variables
+will be dropped. Only 60 of them will be kept.
+
+## 2.2 transform datetime related variables
 There are 3 variable related to date time, after comparing, we translate them into
 day, weekday, hour, minutes.
 ```{r trans_time,echo =FALSE}
-pre_train<- pre_train %>% mutate(dt=dmy_hm(cvtd_timestamp)) %>%
+pre_train<- pre_train %>% 
+  select(-raw_timestamp_part_1, -raw_timestamp_part_2)%>%
+  mutate(dt=dmy_hm(cvtd_timestamp)) %>%
+  mutate(day=day(dt),wday=wday(dt),hour=hour(dt),minute=minute(dt))%>%  
+  select( -cvtd_timestamp,-dt) 
+#%>%mutate(user_name=factor(user_name),new_window=factor(new_window))
+pre_test<- pre_test %>% 
+   select(-raw_timestamp_part_1, -raw_timestamp_part_2)%>%
+  mutate(dt=dmy_hm(cvtd_timestamp)) %>%
   mutate(day=day(dt),wday=wday(dt),hour=hour(dt),minute=minute(dt))%>%
-  select( -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp,-dt) %>%
-  mutate(user_name=factor(user_name),new_window=factor(new_window))
-pre_test<- pre_test %>% mutate(dt=dmy_hm(cvtd_timestamp)) %>%
-  mutate(day=day(dt),wday=wday(dt),hour=hour(dt),minute=minute(dt))%>%
-  select( -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp,-dt) %>%
-  mutate(user_name=factor(user_name),new_window=factor(new_window))
+  select(  -cvtd_timestamp,-dt) 
+#%>%  mutate(user_name=factor(user_name),new_window=factor(new_window))
 ```
 
-## 2.4 transform high skew variable by log10
+
+## 2.3 check variable skewness
 ```{r logtrans, echo=FASLSE}
-skew_criteria <- 5
-skew_score <- pre_train %>% 
-  select(-user_name,-classe,-new_window) %>% 
-  summarize(across(everything(),skewness)) %>% 
-  abs %>%t()
-skew_vars_info <- skew_score[skew_score>skew_criteria,]
-print(skew_vars_info)
-skew_vars <- names(skew_vars_info)
-for (skew_var in skew_vars){
-  print(skew_var)
-  
-  pre_train[,..skew_var] =log10(1+pre_train[,..skew_var])
-  #pre_test[,skew_var] =log10(1+pre_test$skew_var)
-}
+get_log_df<-function(df){
+  skew_criteria <- 5
+  char_vars <- df %>% select_if(is.character) %>% names()
+  numeric_var <- df %>% select_if(is.numeric) %>% names()
 
+  log_vars<- df %>% 
+    summarize(across(all_of(numeric_var),skewness)) %>% t()%>%  
+    data.frame(score=.) 
+  log_vars
+}
+get_log_df(pre_train) %>% filter(abs(.)>2) %>% arrange(desc(abs(score)))
   
 ```
+According to above figure, we can find there is some variable is highly skewed. 
+For example, gyros_dumbbel_z(135), gyros_dumbbel_x(-126), and etc.
+Later, we will use preProcess Boxcox to transform which can transform negative
+value as well.
 
-# 2. Data Slice
+# 2.4 All in one preProcess 
+In this stage, the train/test dataset will be preProcess all in one style:
+- 1. nzv remove near zero values
+- 2. BoxCox, transform skewed variable
+- 3. center,
+- 4. scale, 
+
+```{r mice,echo=TRUE, message=FALSE, warning=FALSE}
+pre_train <- pml_train %>% select(-all_of(var_na_full)) 
+pre_test  <- pml_test  %>% select(-all_of(var_na_full)) 
+ml_pre <- preProcess(pre_train, 
+                     method= c("nzv","BoxCox","center", "scale")
+                     )
+pre_train <- predict(ml_pre, pre_train)
+pre_test <- predict(ml_pre, pre_test)
+print(ml_pre)
+```
+Now, we has finished the preProcess stage. the training data set has reduced from
+160 variable to 60 variables(include the outcome variable 'classe').
+
+
+# 3. Data Slice
 According to the best practice, the train dataset is medium size, so we slice it 60% as training and 40% as validation.
 ```{r slide, echo=FALSE}
 in_train <- createDataPartition(y=pre_train$classe,p=0.6,list=FALSE)
@@ -158,22 +148,30 @@ Now, we has slide the raw pml_train into two part:
 - validation_df, which as `r dim(validation_df)[1]` observation.
 
 
-
 # 4. Train
-In traing stage, we will choice random forest as the train method. our goal is 
-classification which predict 1 of 5 movement classes based on data. And there are
-159 variable with numerical, text type, and some variables are NA. USing random forest
-will be easy to handle those case and can select important variables.
-
-
+## 4.1 base mode
+In traing stage, we will choice 'rpart' as the train method. our goal is 
+classification which predict 1 of 5 movement classes based on data. 
 ```{r train,cache=TRUE}
-
-rf_fit <- train(data=train_df,
-                classe~user_name, 
-                method='rpart')
-rf_fit$results
+set.seed(42)
+fit_base <- train(data=train_df,
+                classe~., 
+                method='rpart',
+                )
+fit_base$results[2][1,]
 ```
-# Validatioin
+In the base mode, we got 74% accuracy mode.
+```{r,fancyplot, echo=FALSE}
+fancyRpartPlot(fit_base$finalModel)
+```
+# Validatioin with ConfusionMatrix
+```{r confusionMatrix}
+set.seed(42)
+
+pred <- predict(fit_base, validate_df)
+
+confusionMatrix(factor(pred), factor(validate_df$classe))
+```
 
 # think the expected out of sample error
 
