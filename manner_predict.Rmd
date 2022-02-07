@@ -1,7 +1,7 @@
 ---
 title: "W4 Course Project: Exercise manner predict"
 author: "WangYong"
-date: "2022/2/3"
+date: "2022/2/7"
 output: html_document
 ---
 
@@ -9,18 +9,32 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 # Executive Summary
-In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of **6 participants**. They were asked to perform barbell lifts correctly and incorrectly in **5 different ways**. The goal of your project is to predict the manner in which they did the exercise. 
+In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of **6 participants**. They were asked to perform barbell lifts correctly and incorrectly in **5 different ways**. The goal of the project is to predict the manner in which they did the exercise. 
 
-This is the "classe" variable in the training set. You may use any of the other variables to predict with any of the other variables to predict with. 
+The whole process including 4 stage:
+1. EDA and clean data as well as preProcess.
 
-You should create a report describing 
-- how you built your model, 
-- how you used cross validation, 
-- what you think the expected out of sample error is, and 
-- why you made the choices you did. 
-- predict 20 different test cases. 
+2. Split pre_train data into train, test, and validate part
 
-# 1. Exploratory Data Analysis
+3. Build 4 models(rpart, LDA, GBM and randomforest) based on train dataset and 
+  Use trcontrol to set cross validation by follow parameter for all models.
+    >trainControl( method = "repeatedcv",
+                   number = 5,
+                   ## repeated 3 times
+                   repeats = 3,
+                   verbose=TRUE
+                   )
+              
+    in order to reprduciable and avoid repeat train, the trained model will be
+    save to file in the first time and in following traing, the save file will be
+    load to avoid training again.
+  
+4. Compare the 4 models 3 stage (train, test and validation) accuracy leavel
+   select random forest as best model.
+   
+5. predict 20 different test cases in pml-test
+
+# 1. Exploratory Data Analysis and clean data
 ```{r init, echo=TRUE,message=FALSE, warning=FALSE}
 library(dplyr) # data manipulate
 library(caret) # machine learning
@@ -29,30 +43,47 @@ library(data.table) # data loading
 library(lubridate) # datetime manipulate
 library(moments)  # caculate moments such skew, and etc.
 library(mice)  # missing value imputation
-library(rattle) # fancyplot for decision treee
+library(rattle) # fancyplot for decision tree
+library(tidyr)
+
 ```
 ## 1.1 Load Data  
 load the pml-training.csv as pml-train, pml-testing.csv as pml-test. 
 ```{r load, echo=FALSE,message=FALSE, warning=FALSE,cache=TRUE}
 pml_train <- fread('pml-training.csv')
-pml_test <- fread('pml-training.csv')
-dim(pml_train)
+pml_test <- fread('pml-testing.csv') 
 
 ```
 The original data has 19622 obs, and 160 variables. 
-
 ## 1.2 check the outcome by contingency table
 ```{r,eda,echo=FALSE}
 table(pml_train$user_name,pml_train$classe)
 ```
 It can be find there is 6 people and 5 types of exercise classes(outcome, need predict) 
 
-# 2. PreProcess
+## 1.3 time based movement class pattern plot 
+```{r class_plot,echo=TRUE,message=FALSE}
+ts_user_class <- pml_train %>% select(new_window,user_name,classe, cvtd_timestamp,num_window) %>%
+  mutate(dt=dmy_hm(cvtd_timestamp),hour=day(dt),minute=minute(dt)) %>%
+  group_by(num_window,new_window,user_name, classe) %>%
+  dplyr::summarise(cnt=n())
+#%>%
+g<- ggplot(data=ts_user_class,aes(num_window,cnt,color=classe))
+g+geom_point(alpha=0.5)+
+  facet_grid(user_name~new_window)
+            
 
-## 2.1 drop missing value variable and keep 60 variable
+```
+For above plot, it can be find the movement class has clean pattern with sequence of
+num_window as well as the new_window variable. The two will be used for trainning.
+The raw_timestamp_part_1, raw_timestamp_part_2, and cvdt_timestamp will be removed.
+
+## 1.4 Clean Data
+
+### 1.4.1 drop missing value variable and keep 60 variable
 ```{r mice, echo=FALSE}
 library(ggplot2)
-drop_ratio=0.97
+drop_ratio=0.95
 get_missing_rate<-function(x) { 100*sum(is.na(x))/length(x)}
 var_na_scores <- sapply(pml_train, get_missing_rate) 
 na_rate_df <- data.frame(table(round(var_na_scores,1)))
@@ -72,31 +103,26 @@ pre_test <- pml_test %>% select(-all_of(var_dropped))
 #print(var_na_full)
 ```
 
-The loaded data in pml-training has 160 variable. However, 100 variabls are 
-almost missing value, the missing value rate is more than 97%. All of the 100 variables
-will be dropped. Only 60 of them will be kept.
+The loaded data in pml-training has 160 variable. However, `r length(var_dropped)` variables are 
+almost missing value, the missing value rate is more than 97%. All of them will 
+be dropped. The cleaned dataset has `r dim(pre_train)[2]` variables.
 
-## 2.2 transform datetime related variables
-There are 3 variable related to date time, after comparing, we translate them into
-day, weekday, hour, minutes.
+### 1.4.2 drop/transform datime time feature
+according to the time based movement classe plot, we will drop below features:
+- raw_timestamp_part_1, 
+- raw_timestamp_part_2, and 
+- cvtd_timestamp
 ```{r trans_time,echo =FALSE}
 pre_train<- pre_train %>% 
-  select(-raw_timestamp_part_1, -raw_timestamp_part_2)%>%
-  mutate(dt=dmy_hm(cvtd_timestamp)) %>%
-  mutate(day=day(dt),wday=wday(dt),hour=hour(dt),minute=minute(dt))%>%  
-  select( -cvtd_timestamp,-dt) 
-#%>%mutate(user_name=factor(user_name),new_window=factor(new_window))
+  mutate(dt=dmy_hm(cvtd_timestamp))%>%
+  select(-raw_timestamp_part_1, -raw_timestamp_part_2,-cvtd_timestamp,-dt)
 pre_test<- pre_test %>% 
-   select(-raw_timestamp_part_1, -raw_timestamp_part_2)%>%
-  mutate(dt=dmy_hm(cvtd_timestamp)) %>%
-  mutate(day=day(dt),wday=wday(dt),hour=hour(dt),minute=minute(dt))%>%
-  select(  -cvtd_timestamp,-dt) 
-#%>%  mutate(user_name=factor(user_name),new_window=factor(new_window))
+  mutate(dt=dmy_hm(cvtd_timestamp))%>%
+  select(-raw_timestamp_part_1, -raw_timestamp_part_2,-cvtd_timestamp,-dt)
 ```
 
-
-## 2.3 check variable skewness
-```{r logtrans, echo=FASLSE}
+### 1.4.3 check variable skewness
+```{r logtrans, echo=FALSE}
 get_log_df<-function(df){
   skew_criteria <- 5
   char_vars <- df %>% select_if(is.character) %>% names()
@@ -107,76 +133,323 @@ get_log_df<-function(df){
     data.frame(score=.) 
   log_vars
 }
-get_log_df(pre_train) %>% filter(abs(.)>2) %>% arrange(desc(abs(score)))
-  
+get_log_df(pre_train) %>% filter(abs(.)>2) %>% arrange(desc(abs(score)))%>%rownames()
+# to do list
+# add boxcox transform to the 6 skewed variable
 ```
 According to above figure, we can find there is some variable is highly skewed. 
 For example, gyros_dumbbel_z(135), gyros_dumbbel_x(-126), and etc.
-Later, we will use preProcess Boxcox to transform which can transform negative
-value as well.
+For unknown reason, using Boxcox transform them bring poor accuracy, So, just 
+leave it now.
+### 1.4.5 final clean-remove id column
+At, this final clean stage, preProcess will be apply to both pre_train, pre_test
+dataset. The variable  V1, Problem_id, and new_window variable will be removed
+as they were not consistent between pre_train and pre_test.
 
-# 2.4 All in one preProcess 
-In this stage, the train/test dataset will be preProcess all in one style:
-- 1. nzv remove near zero values
-- 2. BoxCox, transform skewed variable
-- 3. center,
-- 4. scale, 
+```{r, preProcess, echo=TRUE}
+if (!file.exists('pre_train.rds')){
+  saveRDS(pre_train,'pre_train.rds')
+  }else{
+    pre_train <-readRDS('pre_train.rds')
+    }
 
-```{r mice,echo=TRUE, message=FALSE, warning=FALSE}
-pre_train <- pml_train %>% select(-all_of(var_na_full)) 
-pre_test  <- pml_test  %>% select(-all_of(var_na_full)) 
-ml_pre <- preProcess(pre_train, 
-                     method= c("nzv","BoxCox","center", "scale")
-                     )
-pre_train <- predict(ml_pre, pre_train)
-pre_test <- predict(ml_pre, pre_test)
-print(ml_pre)
+if (!file.exists('pre_test.rds' )) {
+  saveRDS(pre_test,'pre_test.rds')
+  }else{
+    pre_test<-readRDS('pre_test.rds')
+    }
 ```
-Now, we has finished the preProcess stage. the training data set has reduced from
-160 variable to 60 variables(include the outcome variable 'classe').
+
+```{r init_1,echo=FALSE, cache=TRUE}
+
+get_preProces_df<-function(df, file_name='tmp.rds',init=TRUE){
+  
+    if(init){
+      
+      ml_pre <- preProcess(df,
+                          method = c("center", "scale", "YeoJohnson", "nzv")
+                          ) 
+      pre_df <- predict(ml_pre,df)
+      #print(dim(pre_df))
+      
+      
+      ml_dummy<-dummyVars(~.,data=pre_df)
+      pre_df<-as.data.frame(predict(ml_dummy,pre_df))
+      #print(dim(pre_df))
+      
+      saveRDS(ml_pre,'ml_pre.rds')
+      saveRDS(ml_dummy,'ml_dummy.rds')
+    }else{
+      ml_pre <-readRDS('ml_pre.rds')
+      ml_dummy<-readRDS('ml_dummy.rds')
+      
+      pre_df <- predict(ml_pre,df)
+      #print(dim(pre_df))
+      
+      pre_df<-as.data.frame(predict(ml_dummy,pre_df))
+      #print(dim(pre_df))
+    }
+    #saveRDS(pre_df, file_name)
+   pre_df   
+}
+
+target <-     pre_train$classe
+problem_id <- pre_test$problem_id
+
+pre_train <- get_preProces_df(
+  pre_train%>%select(-V1,-classe,-new_window),
+  train_file_name,init=TRUE)
+
+pre_test <- get_preProces_df(
+  pre_test%>%select(-V1,-problem_id,-new_window),
+  test_file_name,init=FALSE)
 
 
-# 3. Data Slice
+```
+
+# 2. Split Data into 3 piece(train, test and validate)
 According to the best practice, the train dataset is medium size, so we slice it 60% as training and 40% as validation.
-```{r slide, echo=FALSE}
-in_train <- createDataPartition(y=pre_train$classe,p=0.6,list=FALSE)
-train_df <-pre_train[in_train,]
-validate_df <- pre_train[-in_train,]
+```{r slide, echo=FALSE, cache=TRUE}
+in_build <- createDataPartition(y=target,p=0.7,list=FALSE)
+validate_df <- pre_train[-in_build,]
+validate_target <-target[-in_build]
+
+build_df <- pre_train[in_build,]
+build_target <-target[in_build]
+
+in_train <- createDataPartition(y=build_target,p=0.7,list=FALSE)
+train_df <-build_df[in_train,]
+train_target <-build_target[in_train]
+test_df <-build_df[-in_train,]
+test_target <-build_target[-in_train]
 ```
 Now, we has slide the raw pml_train into two part:   
 - train_df, which as `r dim(train_df)[1]` observation.
-- validation_df, which as `r dim(validation_df)[1]` observation.
+- test_df, which as `r dim(test_df)[1]` observation.
+- validate_df, which as `r dim(validate_df)[1]` observation.
 
 
-# 4. Train
-## 4.1 base mode
-In traing stage, we will choice 'rpart' as the train method. our goal is 
+# 3. Build 4 Models
+## 3.0 Prepare for build models
+### 3.0.1 Define common functions
+```{r init_fit_models,echo=TRUE, cache=TRUE}
+get_model <-function(df1,target,ml_method='rpart2',var_name=NA,suffix=''){
+  
+  method <- ml_method
+  model_target<-target
+  
+  if (is.na(var_name[1])){
+    model_df <- df1
+    
+  } else{
+    
+    model_df <- df1 %>% select(c(var_name))
+  }
+  model_df <-cbind(model_df,model_target) 
+  
+  model_file_name <- paste0('fit_',method,suffix,'.rds')
+  if (!file.exists(model_file_name )){
+    
+    set.seed(12345)
+    fitControl <- trainControl(## 10-fold CV
+                               method = "repeatedcv",
+                               number = 5,
+                               ## repeated ten times
+                               repeats = 3,
+                               verbose=TRUE
+                              )
+    fit <- train(data=model_df,
+                    model_target~., 
+                    method = method,
+                    trControl = fitControl)
+    saveRDS(fit, model_file_name)
+  } else {
+    message<- paste0('loading model ',model_file_name,'  from previous file')
+    print(message)
+    fit<- readRDS(model_file_name)
+  }
+ 
+  fit
+}
+
+get_pred_accuracy<-function(ml,df,target){
+  pred<-predict(ml,df)
+  pred_confusionmatrix <-confusionMatrix(pred, factor(target))
+  pred_confusionmatrix$overall[[1]]
+}
+
+```
+### 3.0.2 find important variable by rpart method
+In training stage, we will choice 'rpart' as the train method. our goal is 
 classification which predict 1 of 5 movement classes based on data. 
-```{r train,cache=TRUE}
-set.seed(42)
-fit_base <- train(data=train_df,
-                classe~., 
-                method='rpart',
-                )
-fit_base$results[2][1,]
+```{r fit_0,echo=TRUE,cache=TRUE, warning=FALSE}
+method <- 'rpart2'
+fit <- get_model(train_df,train_target,ml_method=method,suffix='base')
+pred_accuracy<- get_pred_accuracy(fit,test_df,test_target)
+print(fit$method)
+print(paste0('train accuracy:    ',
+             round(max(fit$results$Accuracy),4),
+             '    test:    ',
+             round(pred_accuracy,4)))
+fit_rpart_base <- fit
+varImp_name<-varImp(fit_rpart_base)$importance %>% 
+  data.frame()%>%
+  filter(Overall>0)  %>%
+  rownames()
 ```
-In the base mode, we got 74% accuracy mode.
-```{r,fancyplot, echo=FALSE}
-fancyRpartPlot(fit_base$finalModel)
+## 3.1 model 1 - rpart
+### 3.1.1 rpart build model
+```{r fit_1,echo=TRUE,cache=TRUE, warning=FALSE}
+method <- 'rpart2'
+
+fit <- get_model(train_df,train_target,ml_method=method,suffix='')
+pred_accuracy<- get_pred_accuracy(fit,test_df,test_target)
+print(fit$method)
+print(paste0('train accuracy:    ',
+             round(max(fit$results$Accuracy),4),
+             '    test:    ',
+             round(pred_accuracy,4)))
+fit_rpart <-fit
 ```
-# Validatioin with ConfusionMatrix
-```{r confusionMatrix}
-set.seed(42)
 
-pred <- predict(fit_base, validate_df)
+### 3.1.2 plot rpart decison tree
+```{r treeplot,echo=FALSE}
+fancyRpartPlot(fit_rpart$finalModel)
+```
+## 3.2 model 2 - LDA
+```{r lda_fit,echo=TRUE,cache=TRUE, warning=FALSE}
+method <- 'lda'
 
-confusionMatrix(factor(pred), factor(validate_df$classe))
+fit <- get_model(train_df,train_target,ml_method=method,suffix='')
+pred_accuracy<- get_pred_accuracy(fit,test_df,test_target)
+
+print(fit$method)
+print(paste0('train accuracy:    ',
+             round(max(fit$results$Accuracy),4),
+             '    test:    ',
+             round(pred_accuracy,4)))
+fit_lda <- fit
+```
+## 3.3 model3 - gbm 
+### 3.3.1 gbm model build 
+```{r gbm_fit,cache=TRUE,echo=TRUE}
+method = 'gbm'
+
+
+fit <- get_model(train_df,train_target,ml_method=method,suffix='')
+pred_accuracy<- get_pred_accuracy(fit,test_df,test_target)
+print(fit$method)
+print(paste0('train accuracy:    ',
+             round(max(fit$results$Accuracy),4),
+             '    test:    ',
+             round(pred_accuracy,4)))
+
+fit_gbm <- fit
+```
+## 3.3.2 gbm model accuracy CV iterations plot
+```{r echo=FALSE}
+plot(fit_gbm)
+```
+## 3.4 model4 - random forerest
+### 3.4.1 random forest model build
+```{r rf_fit,cache=TRUE,echo=TRUE}
+method = 'rf'
+
+fit <- get_model(train_df,train_target,ml_method=method,suffix='')
+pred_accuracy<- get_pred_accuracy(fit,test_df,test_target)
+print(fit$method)
+print(paste0('train accuracy:    ',
+             round(max(fit$results$Accuracy),4),
+             '    test:    ',
+             round(pred_accuracy,4)))
+
+fit_rf <- fit
 ```
 
-# think the expected out of sample error
+### 3.4.2 random forest feature vs accuracy plot
+```{r fit_rf_plot,echo=FALSE}
+plot(fit_rf)
+```
+# 4. Compare model(in-sample, out-sample)
+## In-sample compare - by accuracy confidence interval
+They are 4 built models, the lda mode accuracy score is too low to accept. The 
+remained 3 models will be compared. They are Randomforest, rpart, gbm. 
+```{r compare_models,echo=FALSE}
+cvValues <- resamples(list(rpart=fit_rpart,
+                           randforest=fit_rf,
+                           gbm=fit_gbm 
+                           ))
+dotplot(cvValues, metric = "Accuracy",lwd=2)
+```
+From above figures, it could be find random forest has high accruacy score and better 
+confidence level.  That means randome forest model has beeen trained well. 
+However, there might be out-of-sample error. Next these model will be check again
+by validation data.
 
-#  why you made the choices you did
+# Out of sample compare (train,test,validation score)
+The best models will be trained on full build data set and compared to validation.
+As random forest method owned **best accuracy level though a bit of slow**, 
+let's use **rf** as final model for out of sample validation.
+```{r combined_validation,cache=TRUE,echo=TRUE}
+full_train <- pre_train[in_build,]
 
-# Predict
+ml_method = 'rf'
+#fit <- get_model(full_train,validate_df,ml_method=ml_method,var_name = varImp_name,suffix='full')
+model_name <- c(
+  fit_rpart$method,
+  fit_lda$method,
+  fit_rf$method,
+  fit_gbm$method)
 
-## Including Plots
+train_accuracy=c(  
+  get_pred_accuracy(fit_rpart,train_df,train_target),
+  get_pred_accuracy(fit_lda,train_df,train_target),
+  get_pred_accuracy(fit_rf,train_df,train_target),
+  get_pred_accuracy(fit_gbm,train_df,train_target)
+)
+test_accuracy=c(
+  get_pred_accuracy(fit_rpart,test_df,test_target),
+  get_pred_accuracy(fit_lda,test_df,test_target),
+  get_pred_accuracy(fit_rf,test_df,test_target),
+  get_pred_accuracy(fit_gbm,test_df,test_target)
+)
+validate_accuracy=c(
+  get_pred_accuracy(fit_rpart,validate_df,validate_target),
+  get_pred_accuracy(fit_lda,validate_df,validate_target),
+  get_pred_accuracy(fit_rf,validate_df,validate_target),
+  get_pred_accuracy(fit_gbm,validate_df,validate_target)
+)
+accuracy_df<-data.frame(model=model_name,
+                        train=train_accuracy,
+                        test=test_accuracy,
+                        validate=validate_accuracy)
+accuracy_df <- accuracy_df %>% pivot_longer(cols=2:4,names_to='type',values_to='score')
+g<-ggplot(data=accuracy_df, aes(x=type, y=score,color=model))
+g+geom_point()
+```
+According the the out-of sample confusion-Maxtrix result, the accuracy is still 
+**99.3%**. There is no significant over-fit. That means random forest is also 
+generalizaed. 
+
+# 5. predict 20 different test cases in pml-test
+```{r predict_20,echo=TRUE, cache=TRUE}
+
+file_name <-'pre_test.rds'
+
+submit_df<-data.frame(
+  problem_id=problem_id,
+  rpart_pred=predict(fit_rpart,pre_test),
+  rf_pred=predict(fit_rf,pre_test),
+  gbm_pred=predict(fit_gbm,pre_test)) %>% 
+  pivot_longer(cols=2:4,
+               names_to='model_name',
+               values_to='pred_classe')
+
+g<-ggplot(data=submit_df,aes(x=problem_id,y=pred_classe,color=model_name))
+g+geom_point(alpha=0.5)
+
+final_submit <-submit_df %>% filter(model_name=='rf_pred') %>%select(problem_id, pred_classe)
+write.csv(final_submit,'final_submit.csv')
+```
+From above plot, we can find the randomforest predict same as gbm predict result.
+We use random forest as 20 class predict final result and save it to csv.
